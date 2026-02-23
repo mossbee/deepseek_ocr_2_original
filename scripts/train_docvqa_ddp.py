@@ -10,6 +10,11 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 from transformers import AutoModel, AutoTokenizer, get_cosine_schedule_with_warmup
 
+try:
+    import wandb
+except ImportError:
+    wandb = None
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -38,6 +43,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--save_every", type=int, default=500)
     p.add_argument("--num_workers", type=int, default=2)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--wandb_project", type=str, default="")
+    p.add_argument("--wandb_entity", type=str, default="")
+    p.add_argument("--wandb_name", type=str, default="")
+    p.add_argument("--wandb_mode", type=str, default="online", choices=["online", "offline", "disabled"])
+    p.add_argument("--wandb_run_id", type=str, default="")
     return p.parse_args()
 
 
@@ -141,9 +151,24 @@ def main() -> None:
     device = torch.device(f"cuda:{local_rank}")
     is_main = rank == 0
     out_dir = Path(args.output_dir)
+    wandb_run = None
+    if is_main and args.wandb_project:
+        if wandb is None:
+            raise RuntimeError("wandb is not installed. Run: pip install wandb")
+        wandb_run = wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity or None,
+            name=args.wandb_name or None,
+            id=args.wandb_run_id or None,
+            resume="allow",
+            mode=args.wandb_mode,
+            config=vars(args),
+            dir=str(out_dir),
+        )
     if is_main:
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "args.json").write_text(json.dumps(vars(args), indent=2), encoding="utf-8")
+
 
     model_ref = resolve_model_ref(args)
     hf_token = args.hf_token.strip() or os.environ.get("HF_TOKEN", None)
@@ -229,13 +254,30 @@ def main() -> None:
                 scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
                 global_step += 1
-                if is_main and global_step % args.log_every == 0:
+                if is_main and wandb_run and global_step % args.log_every == 0:
+                    wandb.log(
+                        {
+                            "train/loss": loss.item() * args.grad_accum_steps,
+                            "train/lr": scheduler.get_last_lr()[0],
+                            "train/epoch": epoch,
+                            "train/global_step": global_step,
+                        },
+                        step=global_step,
+                    )
                     print(f"epoch={epoch} step={global_step} loss={loss.item() * args.grad_accum_steps:.4f}")
                 if is_main and global_step % args.save_every == 0:
                     save_ckpt(out_dir / f"checkpoint_step_{global_step}.pt", model, optimizer, scheduler, global_step, epoch)
 
         val_loss = evaluate_loss(model, eval_loader, device, world_size)
-        if is_main:
+        if is_main and wandb_run:
+            wandb.log(
+                {
+                    "val/loss": val_loss,
+                    "val/epoch": epoch,
+                    "train/global_step": global_step,
+                },
+                step=global_step,
+            )
             print(f"epoch={epoch} val_loss={val_loss:.4f}")
             save_ckpt(out_dir / f"checkpoint_epoch_{epoch}.pt", model, optimizer, scheduler, global_step, epoch)
 
@@ -243,7 +285,8 @@ def main() -> None:
         core = model.module if isinstance(model, DDP) else model
         core.save_pretrained(out_dir / "final_model")
         tokenizer.save_pretrained(out_dir / "final_model")
-
+    if is_main and wandb_run:
+        wandb.finish()
     cleanup_dist(world_size)
 
 
