@@ -88,8 +88,29 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
+def _find_vision_core(model: torch.nn.Module) -> torch.nn.Module:
+    queue = [model]
+    visited = set()
+    while queue:
+        cur = queue.pop(0)
+        if cur is None:
+            continue
+        cur_id = id(cur)
+        if cur_id in visited:
+            continue
+        visited.add(cur_id)
+        if all(hasattr(cur, x) for x in ["sam_model", "qwen2_model", "projector", "view_seperator"]):
+            return cur
+        queue.append(getattr(cur, "model", None))
+        queue.append(getattr(cur, "base_model", None))
+    raise AttributeError(
+        "Could not find OCR2 vision core with sam_model/qwen2_model/projector/view_seperator. "
+        "Model wrapping layout may have changed."
+    )
+
+
 def freeze_vision_branch(model: torch.nn.Module) -> None:
-    model_core = model.model
+    model_core = _find_vision_core(model)
     for module in [model_core.sam_model, model_core.qwen2_model, model_core.projector]:
         for p in module.parameters():
             p.requires_grad = False
@@ -233,6 +254,7 @@ def main() -> None:
         torch_dtype=torch.bfloat16,
         _attn_implementation="flash_attention_2",
     )
+    model = model.to(device)
     model = maybe_enable_lora(model, args)
     freeze_vision_branch(model)
     if is_main:
