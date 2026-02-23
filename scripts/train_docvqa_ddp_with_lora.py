@@ -231,7 +231,7 @@ def main() -> None:
         token=hf_token,
         use_safetensors=True,
         torch_dtype=torch.bfloat16,
-        _attn_implementation=args.attn_implementation,
+        _attn_implementation="flash_attention_2",
     )
     model = maybe_enable_lora(model, args)
     freeze_vision_branch(model)
