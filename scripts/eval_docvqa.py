@@ -8,6 +8,11 @@ from typing import List
 import torch
 from transformers import AutoModel, AutoTokenizer
 
+try:
+    from peft import PeftModel
+except ImportError:
+    PeftModel = None
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -26,6 +31,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max_samples", type=int, default=1000)
     p.add_argument("--output_path", type=str, default="/home/mossbee/project/deepseek_ocr_2_replication/outputs/docvqa_eval.json")
     p.add_argument("--max_new_tokens", type=int, default=64)
+    p.add_argument(
+        "--adapter_path",
+        type=str,
+        default="",
+        help="Path to LoRA adapter (e.g. output_dir/final_model). If set, load base model from --model_path/--hf_model_id then apply this adapter.",
+    )
     return p.parse_args()
 
 
@@ -91,6 +102,12 @@ def main() -> None:
         torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
         _attn_implementation="flash_attention_2" if torch.cuda.is_available() else "eager",
     ).to(device)
+    adapter_path = (args.adapter_path or "").strip()
+    if adapter_path:
+        if PeftModel is None:
+            raise RuntimeError("LoRA adapter path given but peft is not installed. Run: pip install peft")
+        print(f"loading_adapter={adapter_path}")
+        model = PeftModel.from_pretrained(model, adapter_path, is_trainable=False)
     model.eval()
     packer = OCR2Packer(tokenizer=tokenizer)
     ds = DocVQASplit(split=args.split, max_samples=args.max_samples)
